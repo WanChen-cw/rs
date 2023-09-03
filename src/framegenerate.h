@@ -20,13 +20,13 @@ public:
 
 	template <class A = std::allocator<B>>
 	void generate(std::vector<B, A>& U, const uint32_t frame_id, const uint32_t feedback_frame_id, const bool isReliableFrame = 0);
-	//void generate(B* U_K, const int frame_id = -1, const bool managed_memory = true);
-	//void generate(B* U,const uint32_t frame_id, const uint32_t feedback_frame_id, const bool ReliableFrame=0);
+	
+
+	std::unique_ptr<module::CRC<>>					crc;
 protected:
 	int   FrameLength;
 	int   datelength;
 	std::unique_ptr<module::Source<>>				source;
-	std::unique_ptr<module::CRC<>>					crc;
 
 	std::vector<B> frameheader;
 	std::vector<B> ReliableFrame;
@@ -42,14 +42,14 @@ framegenerate<B>
 	:FrameLength(FrameLength), datelength(datelength)
 {
 	source = std::unique_ptr<module::Source_random				<>>(new module::Source_random			<>(datelength * 8));
-	crc = std::unique_ptr<module::CRC_polynomial				<>>(new module::CRC_polynomial			<>((FrameLength - 4) * 8, "32-GZIP"));
+	crc = std::unique_ptr<module::CRC_polynomial				<>>(new module::CRC_polynomial			<>((datelength + 9) * 8, "32-GZIP"));
 	frameheader = { 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0 };
 	frameend = { 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1 };
 
 	ReliableFrame = std::vector<B>(8);
 	date = std::vector<B>(8 * datelength);
 	buf1 = std::vector<B>(8 * (datelength + 9));
-	crcinfo = std::vector<B>(8 * (FrameLength));
+	crcinfo = std::vector<B>(8 * (datelength+13));
 }
 
 template <typename B>
@@ -85,12 +85,14 @@ void framegenerate<B>
 	crc->build(buf1, crcinfo);
 
 
-	//
-	////frameheader
-	//std::copy(std::begin(frameheader), std::end(frameheader), std::begin(U));
-	//std::copy(std::begin(crcinfo), std::end(crcinfo), std::begin(U) + 16);
-	////end
-	//std::copy(std::begin(frameend), std::end(frameend), std::end(U) - 16);
-	std::copy(std::begin(crcinfo), std::end(crcinfo), std::begin(U));
+	
+	//frameheader
+	std::copy(std::begin(frameheader), std::end(frameheader), std::begin(U));
+
+	std::copy(std::begin(crcinfo), std::end(crcinfo), std::begin(U) + 16);
+	//end
+	std::copy(std::begin(frameend), std::end(frameend), std::end(U) - 16);
+	 
+	//std::copy(std::begin(crcinfo), std::end(crcinfo), std::begin(U));
 }
 #endif /*FRAMEGENERATE_HPP_*/

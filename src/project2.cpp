@@ -40,7 +40,7 @@ void read_File(const std::string& filename, std::vector<T>& ep) {
 int main() {
 	//parameters init
 	int Frame_size = 1000;		//number of  frames      (byte)
-	int FrameLength = 2226;		//length of  frame 
+	int FrameLength = 2230;		//length of  frame 
 	int datelength = 2213;		//length of  data
 	int frame_itl_number = 128;	//Number of interleaved frames
 	int size_rs_N = 255;		//parameters of RS
@@ -50,6 +50,7 @@ int main() {
 	int fe = 100;				//Number of errored frames (simulation stop condition) (not used)
 	int seed = 0;				//random number seed
 
+	int window_size = 2560;
 	int dely_frame = 2000;		//延迟通信
 	//channel parameters ep reading
 	std::vector<float> ep;
@@ -66,17 +67,20 @@ int main() {
 	std::vector<int  > itl_bits = std::vector<int  >(bit_length_transmission);
 	std::vector<float> LLRs = std::vector<float>(bit_length_transmission);
 	std::vector<float> itl_LLRs = std::vector<float>(bit_length_transmission);
-	std::vector<int  > dec_bits = std::vector<int  >(m * FrameLength * frame_itl_number);
+	std::vector<int  > dec_bits = std::vector<int  >(bit_length_source);
 	std::vector<int>	sub_itl_bits;
 	std::vector<float>	sub_symbols = std::vector<float>(vary_chl_bit);
 	std::vector<float>	sub_noisy_symbols = std::vector<float>(vary_chl_bit);
 	std::vector<float>	sub_LLRs = std::vector<float>(vary_chl_bit);
 	std::vector<float>	current_ep(1);
+	std::vector<float>	current_ep1(1, 0.0034);
+	std::vector<int>	segmentdec = std::vector<int  >(m * (datelength + 13));
+	std::vector<int>	segmentdec_info = std::vector<int  >(m * (datelength + 9));
+	std::vector<int>	segmentdec_crc = std::vector<int  >(m * (datelength + 13));
 
 	//module init
 	std::unique_ptr<framegenerate<>>				source = std::unique_ptr<framegenerate <>>(new framegenerate <>(FrameLength, datelength));
 	tools::RS_polynomial_generator					GF_poly(next_power_of_2(size_rs_N) - 1, size_rs_T);
-	std::unique_ptr<module::CRC<>>					crc = std::unique_ptr<module::CRC_polynomial<>>(new module::CRC_polynomial<>((FrameLength - 4) * 8, "32-GZIP"));
 	std::unique_ptr<module::Encoder<>>				encoder = std::unique_ptr<module::Encoder<>>(new module::Encoder_RS<>(size_rs_K, size_rs_N, GF_poly));
 	std::unique_ptr<tools::Interleaver_core<>>		itl_core = std::unique_ptr<tools::Interleaver_core <>>(new tools::Interleaver_core_random<>(bit_length_transmission));
 	std::unique_ptr<module::Interleaver<>>			itl1 = std::unique_ptr<module::Interleaver <>>(new module::Interleaver<>(*itl_core));
@@ -93,7 +97,7 @@ int main() {
 	}
 	std::unique_ptr<module::Interleaver<float>>		itl2 = std::unique_ptr<module::Interleaver <float>>(new module::Interleaver<float>(*itl_core));
 	std::unique_ptr<module::Decoder_RS_std<>>		decoder = std::unique_ptr<module::Decoder_RS_std<>>(new module::Decoder_RS_std<>(size_rs_K, size_rs_N, GF_poly));
-	std::unique_ptr<module::Monitor_BFER<>>			monitor = std::unique_ptr<module::Monitor_BFER	<>>(new module::Monitor_BFER<>(8 * FrameLength, fe));
+	std::unique_ptr<module::Monitor_BFER<>>			monitor = std::unique_ptr<module::Monitor_BFER	<>>(new module::Monitor_BFER<>(8 * (FrameLength-4), fe));
 	//tools
 	std::vector<std::unique_ptr<tools::Reporter>>		reporters; // list of reporters dispayed in the terminal
 	std::unique_ptr<tools::Terminal_std>				terminal;  // manage the output text in the terminal
@@ -158,26 +162,20 @@ int main() {
 	for (int i = 0; i < frame_itl_number; ++i) {
 		int startIdx = i * m * FrameLength;
 		int endIdx = (i + 1) * m * FrameLength;
-		//std::vector<int> segment = std::vector<int  >(m * (FrameLength));
-		std::vector<int> segmentdec = std::vector<int  >(m * (FrameLength));
 		for (size_t j = 0; j < segmentdec.size(); ++j) {
-			//segment[j] = ref_bits[i * segment.size() + j];
-			segmentdec[j] = dec_bits[i * segmentdec.size() + j];
+			segmentdec[j] = dec_bits[startIdx+16 + j];
 		}
-		//monitor->check_errors(dec_bits, ref_bits);
-		std::vector<int> segment = std::vector<int  >(m * (FrameLength - 4));
-		std::vector<int> segmentcrc = std::vector<int  >(m * (FrameLength));
-		std::copy(std::begin(segmentdec), std::end(segmentdec) - 32, std::begin(segment));
-		crc->build(segment, segmentcrc);
+		std::copy(std::begin(segmentdec), std::end(segmentdec) - 32, std::begin(segmentdec_info));
+		source->crc->build(segmentdec_info, segmentdec_crc);
 		//检测是否错误
 		//monitor->check_errors(segmentcrc, segmentdec);
-		int error= monitor->check_errors(segmentcrc, segmentdec);
+		int error= monitor->check_errors(segmentdec_crc, segmentdec);
 		//---------------------------------------------------------
 		unsigned int frame_id = 0;
 		if (!error)
 		{	//int32 数组转为uint32值
 			for (int i = 0; i < 32; ++i) {
-				bool bit = segmentcrc[8 + i];
+				bool bit = segmentdec_crc[8 + i];
 				frame_id |= (bit << (31 - i));
 			}
 		}
@@ -200,7 +198,6 @@ int main() {
 	//-------------------------------------------------------------------------------------------------------------------
 	//------------------------------------------------------------------------------------------------------------------- 
 	outFile.close(); // 关闭文件
-	terminal->start_temp_report();
 	// display the performance (BER and FER) in the terminal
 	terminal->final_report();
 	// reset the monitor for the next SNR

@@ -21,7 +21,7 @@ void read_File(const std::string& filename, std::vector<T>& ep) {
 int main() {
 	//parameters init
 	int Frame_size = 1000;		//number of  frames      (byte)
-	int FrameLength = 2226;		//length of  frame 
+	int FrameLength = 2230;		//length of  frame 
 	int datelength = 2213;		//length of  data
 	int frame_itl_number = 128;	//Number of interleaved frames
 	int size_rs_N = 255;		//parameters of RS
@@ -32,6 +32,7 @@ int main() {
 	int seed = 0;				//random number seed
 
 	int window_size = 2560;
+	int dely_frame = 2000;		//延迟通信
 	//channel parameters ep reading
 	std::vector<float> ep;
 	std::string channel_filename = "../conf/channel/channelfile.txt";
@@ -39,26 +40,28 @@ int main() {
 
 	//buffer
 	int m = (int)std::ceil(std::log2(size_rs_N));				//Each byte of data requires m bits of binary representation
-	int bit_length_source= m * FrameLength * frame_itl_number;	//The bit length of each transmission
+	int bit_length_source = m * FrameLength * frame_itl_number;	//The bit length of each transmission
 	int number_rs = (FrameLength * frame_itl_number + size_rs_K - 1) / size_rs_K;//The number of rs codes required
 	int bit_length_transmission = m * size_rs_N * number_rs;	//
-	std::vector<int  > ref_bits =	std::vector<int >	(bit_length_source);
-	std::vector<int  > enc_bits =	std::vector<int >	(bit_length_transmission);
-	std::vector<int  > itl_bits =	std::vector<int  >	(bit_length_transmission);
-	std::vector<float> LLRs		=	std::vector<float>	(bit_length_transmission);
-	std::vector<float> itl_LLRs =	std::vector<float>	(bit_length_transmission);
-	std::vector<int  > dec_bits =	std::vector<int  >	(m * FrameLength * frame_itl_number);
+	std::vector<int  > ref_bits = std::vector<int >(bit_length_source);
+	std::vector<int  > enc_bits = std::vector<int >(bit_length_transmission);
+	std::vector<int  > itl_bits = std::vector<int  >(bit_length_transmission);
+	std::vector<float> LLRs = std::vector<float>(bit_length_transmission);
+	std::vector<float> itl_LLRs = std::vector<float>(bit_length_transmission);
+	std::vector<int  > dec_bits = std::vector<int  >(bit_length_source);
 	std::vector<int>	sub_itl_bits;
 	std::vector<float>	sub_symbols = std::vector<float>(vary_chl_bit);
 	std::vector<float>	sub_noisy_symbols = std::vector<float>(vary_chl_bit);
 	std::vector<float>	sub_LLRs = std::vector<float>(vary_chl_bit);
 	std::vector<float>	current_ep(1);
-	std::vector<float>	current_ep1(1,0.0034);
+	std::vector<float>	current_ep1(1, 0.0034);
+	std::vector<int>	segmentdec = std::vector<int  >(m * (datelength + 13));
+	std::vector<int>	segmentdec_info = std::vector<int  >(m * (datelength + 9));
+	std::vector<int>	segmentdec_crc = std::vector<int  >(m * (datelength + 13));
 
 	//module init
 	std::unique_ptr<framegenerate<>>				source = std::unique_ptr<framegenerate <>>(new framegenerate <>(FrameLength, datelength));
 	tools::RS_polynomial_generator					GF_poly(next_power_of_2(size_rs_N) - 1, size_rs_T);
-	std::unique_ptr<module::CRC<>>					crc = std::unique_ptr<module::CRC_polynomial<>>(new module::CRC_polynomial<>((FrameLength - 4) * 8, "32-GZIP"));
 	std::unique_ptr<module::Encoder<>>				encoder = std::unique_ptr<module::Encoder<>>(new module::Encoder_RS<>(size_rs_K, size_rs_N, GF_poly));
 	std::unique_ptr<tools::Interleaver_core<>>		itl_core = std::unique_ptr<tools::Interleaver_core <>>(new tools::Interleaver_core_random<>(bit_length_transmission));
 	std::unique_ptr<module::Interleaver<>>			itl1 = std::unique_ptr<module::Interleaver <>>(new module::Interleaver<>(*itl_core));
@@ -69,13 +72,13 @@ int main() {
 	std::unique_ptr<module::Modem<>>	modem2;
 	std::unique_ptr<module::Channel<>>	channe2;
 	if (remaining_itl_bits > 0) {
-			modem2 = std::unique_ptr<module::Modem<>>(new module::Modem_OOK_BSC   <>(remaining_itl_bits));
-			channe2 = std::unique_ptr<module::Channel<>>(new module::Channel_binary_symmetric<>(remaining_itl_bits));
-			channe2->set_seed(seed);
+		modem2 = std::unique_ptr<module::Modem<>>(new module::Modem_OOK_BSC   <>(remaining_itl_bits));
+		channe2 = std::unique_ptr<module::Channel<>>(new module::Channel_binary_symmetric<>(remaining_itl_bits));
+		channe2->set_seed(seed);
 	}
 	std::unique_ptr<module::Interleaver<float>>		itl2 = std::unique_ptr<module::Interleaver <float>>(new module::Interleaver<float>(*itl_core));
 	std::unique_ptr<module::Decoder_RS_std<>>		decoder = std::unique_ptr<module::Decoder_RS_std<>>(new module::Decoder_RS_std<>(size_rs_K, size_rs_N, GF_poly));
-	std::unique_ptr<module::Monitor_BFER<>>			monitor = std::unique_ptr<module::Monitor_BFER	<>>(new module::Monitor_BFER<>(8 * FrameLength, fe));
+	std::unique_ptr<module::Monitor_BFER<>>			monitor = std::unique_ptr<module::Monitor_BFER	<>>(new module::Monitor_BFER<>(8 * (FrameLength - 4), fe));
 	//tools
 	std::vector<std::unique_ptr<tools::Reporter>>		reporters; // list of reporters dispayed in the terminal
 	std::unique_ptr<tools::Terminal_std>				terminal;  // manage the output text in the terminal
@@ -195,7 +198,6 @@ int main() {
 	outFile.close();			// 关闭文件frame_id
 	//terminal->final_report();	// display the performance (BER and FER) in the terminal
 	monitor->reset();			// reset the monitor for the next SNR
-	//terminal->reset();
 	closesocket(clientSocket);	//断开连接
 	WSACleanup();
 	return 0;

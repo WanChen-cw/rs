@@ -1,6 +1,23 @@
+#include <queue>
 #include "framegenerate.h"
 #pragma comment(lib, "ws2_32.lib")
 
+uint32_t findMaxContinuousValue(std::vector<uint32_t>& feedback_frame_id, uint32_t k) {
+	std::sort(feedback_frame_id.begin(), feedback_frame_id.end()); // Sort the sequence
+
+	uint32_t max_continuous_value = k + 1;
+
+	for (const uint32_t value : feedback_frame_id) {
+		if (value == max_continuous_value) {
+			max_continuous_value++;
+		}
+		else if (value > max_continuous_value) {
+			break;
+		}
+	}
+
+	return max_continuous_value - 1;
+}
 
 template <typename T>
 void read_File(const std::string& filename, std::vector<T>& ep) {
@@ -20,14 +37,17 @@ void read_File(const std::string& filename, std::vector<T>& ep) {
 
 int main() {
 	//parameters init
-	int Frame_size = 1000;		//number of  frames      (byte)
+	int Frame_size = 10000;		//number of  frames      (byte)
 	int FrameLength = 2230;		//length of  frame 
 	int datelength = 2213;		//length of  data
-	int frame_itl_number = 128;	//Number of interleaved frames
+	bool isReliableFrame = 1;
+	int SFrameLength = 2048;
+	int Sdatelength = 2016;
+	int frame_itl_number = 256;	//Number of interleaved frames
 	int size_rs_N = 255;		//parameters of RS
 	int size_rs_T = 16;
 	int size_rs_K = size_rs_N - 2 * size_rs_T;
-	int vary_chl_bit = 1000;	//Every x bit channel condition change
+	int vary_chl_bit = 5000;	//Every x bit channel condition change
 	int fe = 100;				//Number of errored frames (simulation stop condition) (not used)
 	int seed = 0;				//random number seed
 
@@ -46,7 +66,11 @@ int main() {
 	std::vector<int  > ref_bits = std::vector<int >(bit_length_source);
 	std::vector<int  > enc_bits = std::vector<int >(bit_length_transmission);
 	std::vector<int  > itl_bits = std::vector<int  >(bit_length_transmission);
-	std::vector<float> LLRs = std::vector<float>(bit_length_transmission);
+	int num_synchronize = (bit_length_transmission + 8 * Sdatelength - 1) / (8 * Sdatelength);
+	int	Slength = num_synchronize * m * SFrameLength;
+	std::vector<int  > Sy_bits = std::vector<int  >(Slength);
+	std::vector<float> LLRs = std::vector<float>(Slength);
+	std::vector<float> deSy = std::vector<float>(bit_length_transmission);
 	std::vector<float> itl_LLRs = std::vector<float>(bit_length_transmission);
 	std::vector<int  > dec_bits = std::vector<int  >(bit_length_source);
 	std::vector<int>	sub_itl_bits;
@@ -65,10 +89,12 @@ int main() {
 	std::unique_ptr<module::Encoder<>>				encoder = std::unique_ptr<module::Encoder<>>(new module::Encoder_RS<>(size_rs_K, size_rs_N, GF_poly));
 	std::unique_ptr<tools::Interleaver_core<>>		itl_core = std::unique_ptr<tools::Interleaver_core <>>(new tools::Interleaver_core_random<>(bit_length_transmission));
 	std::unique_ptr<module::Interleaver<>>			itl1 = std::unique_ptr<module::Interleaver <>>(new module::Interleaver<>(*itl_core));
+	//--------------
+	std::unique_ptr<Synchronizeframegenerate<>>		synchronize= std::unique_ptr<Synchronizeframegenerate <>>(new Synchronizeframegenerate <>(SFrameLength, Sdatelength));
 	std::unique_ptr<module::Modem<>>				modem1 = std::unique_ptr<module::Modem<>>(new module::Modem_OOK_BSC   <>(vary_chl_bit));
 	std::unique_ptr<module::Channel<>>				channel = std::unique_ptr<module::Channel<>>(new module::Channel_binary_symmetric<>(vary_chl_bit));
 	channel->set_seed(seed);
-	int remaining_itl_bits = itl_bits.size() % vary_chl_bit;
+	int remaining_itl_bits = Sy_bits.size() % vary_chl_bit;
 	std::unique_ptr<module::Modem<>>	modem2;
 	std::unique_ptr<module::Channel<>>	channe2;
 	if (remaining_itl_bits > 0) {
@@ -84,9 +110,9 @@ int main() {
 	std::unique_ptr<tools::Terminal_std>				terminal;  // manage the output text in the terminal
 	reporters.push_back(std::unique_ptr<tools::Reporter>(new tools::Reporter_BFER<>(*monitor)));			// report the bit/frame error rates
 	reporters.push_back(std::unique_ptr<tools::Reporter>(new tools::Reporter_throughput<>(*monitor)));		// report the simulation throughputs
-	//terminal = std::unique_ptr<tools::Terminal_std>(new tools::Terminal_std(reporters));					// create a terminal that will display the collected data from the reporters
-	//terminal->legend();																						// display the legend in the terminal
-	//terminal->start_temp_report();
+	terminal = std::unique_ptr<tools::Terminal_std>(new tools::Terminal_std(reporters));					// create a terminal that will display the collected data from the reporters
+	terminal->legend();																						// display the legend in the terminal
+	terminal->start_temp_report();
 	//-------------------------------------------------------------------------------------------------------------------
 	//------------------------------------------------------------------------------------------------------------------- 
 	// socket通信
@@ -101,36 +127,45 @@ int main() {
 	serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1"); // Server IP address
 	connect(clientSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
 	//-------------------------------------------------------------------------------------------------------------------
-	std::vector<char>	llrbyteData(LLRs.size() * sizeof(float));			//将llr数据浮点数向量转换为字节流便于发送
-	std::vector<uint32_t>feedback_frame_id = std::vector<uint32_t>(1, 0);	//接收到的最后反馈帧号
-	uint32_t frame_id_cur = 0;												//当前发送帧号
-	uint32_t frame_id_next = 1;												//已发送的最大传输帧号id加一
-	uint32_t feedback_frame_id_last = 0;									//上一个反馈帧号
-	bool isReliableFrame = 0;
-	int error = 0;															//当前是否错误
-	std::vector<char> frame_id_recv;										//反馈
+	std::vector<char>	llrbyteData(LLRs.size() * sizeof(float));//将llr数据浮点数向量转换为字节流便于发送
+	std::vector<char> recvllrbyteData;
+	recvllrbyteData.resize(Slength * sizeof(float));
+	std::vector<char>	RecvFeedbackFrameIdByteData;	//反馈帧序号字节流
+	std::vector<char>	SendFrameIdByteData;			//发送反馈帧序号字节流
+	//----------------------------------
+	std::vector<uint32_t>recv_feedback_frame_id = std::vector<uint32_t>(1, 0);	//接收到的最后反馈帧号
+	uint32_t frame_id_cur = 0;								//当前发送帧号
+	uint32_t frame_id_next = 1;								//已发送的最大传输帧号id加一
+	uint32_t recv_feedback_frame_id_last = 0;				//上一个反馈帧号
+	int error = 0;											//当前是否错误
+	uint32_t feedback_frame_id = 0;							//反馈帧序号
+	std::vector<uint32_t>recv_frame_id;						//接收到的传输帧号
+	std::queue<uint32_t> dely_frame_id;						//延时队列
+	for (int i = 0; i < dely_frame; ++i) {					//延时队列初始化
+		dely_frame_id.push(0);
+	}
 	//------------------------------------------------------------------------------------------------------------------- 
 	//sumulation
-	std::cout << "client! " << std::endl;
-	std::ofstream outFile("../conf/result/frane_id.txt"); // 文件用于写入
-	while (feedback_frame_id[0] < Frame_size) {
+	std::cout << "ALICE! " << std::endl;
+	std::ofstream outFile("../conf/result/ALICE.txt"); // 文件用于写入
+	while (recv_feedback_frame_id[0] < Frame_size) {
 		for (int i = 0; i < frame_itl_number; ++i) {
 			if (error == 0){
 			frame_id_cur = frame_id_next;
 			frame_id_next++;
 			}
 		else {
-			if (feedback_frame_id[0] != feedback_frame_id_last){
+			if (recv_feedback_frame_id[0] != recv_feedback_frame_id_last){
 				frame_id_cur = frame_id_next;
 				frame_id_next++;
-				feedback_frame_id_last = feedback_frame_id[0];
+				recv_feedback_frame_id_last = recv_feedback_frame_id[0];
 				error = 0;
 			}
 		}
-		if ((frame_id_cur - feedback_frame_id[0]) > window_size){
+		if ((frame_id_cur - recv_feedback_frame_id[0]) > window_size){
 			error = 1;
 			frame_id_next = frame_id_cur;
-			frame_id_cur = feedback_frame_id[0];
+			frame_id_cur = recv_feedback_frame_id[0];
 		}
 		if (outFile.is_open()) { // 确保文件成功打开
 			outFile << frame_id_cur<< std::endl;
@@ -138,7 +173,7 @@ int main() {
 		int startIdx = i * m * FrameLength;
 		int endIdx = (i + 1) * m * FrameLength;
 		std::vector<int> segment = std::vector<int  >(m * FrameLength);
-		source->generate(segment, frame_id_cur++, 0, isReliableFrame);
+		source->generate(segment, frame_id_cur++, feedback_frame_id, isReliableFrame);
 		for (size_t j = 0; j < segment.size(); ++j) {
 			ref_bits[i * segment.size() + j] = segment[j];
 		}
@@ -155,14 +190,32 @@ int main() {
 		encoder->encode(segment, enc_segment);
 		for (size_t j = 0; j < enc_segment.size(); ++j) {
 			enc_bits[i * size_rs_N * 8 + j] = enc_segment[j];
-			//std::cout << "Element " << startIdx + j << ": " << enc_segment[j] << std::endl;
 		}
 	}
 		itl1->interleave(enc_bits, itl_bits);
-		int num_subvectors = itl_bits.size() / vary_chl_bit;
+		//---------------------------------------
+		//同步帧合成
+		for (int i=0;i< num_synchronize;i++)
+		{
+			int startIdx = i * Sdatelength * 8;
+			int endIdx = std::min((i + 1) * Sdatelength * 8, static_cast<int>(itl_bits.size()));
+			std::vector<int> segment(itl_bits.begin() + startIdx, itl_bits.begin() + endIdx);
+			if (endIdx < (i + 1) * Sdatelength * 8) {
+				int zerosToAdd = (i + 1) * Sdatelength * 8 - endIdx;
+				segment.insert(segment.end(), zerosToAdd, 0);
+			}
+			std::vector<int> Sy_segment(8 * SFrameLength);
+			uint64_t id = (uint64_t)1 << 40 + (uint64_t)i;
+			synchronize->generate(segment,id, Sy_segment);
+			for (size_t j = 0; j < Sy_segment.size(); ++j) {
+				Sy_bits[i * SFrameLength * 8 + j] = Sy_segment[j];
+			}
+		}
+		//-----------------------------------------
+		int num_subvectors = Sy_bits.size() / vary_chl_bit;
 		int current_ep_index = 0;
 		for (int i = 0; i < num_subvectors; i++) {
-		sub_itl_bits.assign(itl_bits.begin() + i * vary_chl_bit, itl_bits.begin() + (i + 1) * vary_chl_bit);
+		sub_itl_bits.assign(Sy_bits.begin() + i * vary_chl_bit, Sy_bits.begin() + (i + 1) * vary_chl_bit);
 		current_ep[0]= ep[current_ep_index];
 		modem1->modulate(sub_itl_bits, sub_symbols);
 		channel->add_noise(current_ep, sub_symbols, sub_noisy_symbols);
@@ -173,7 +226,7 @@ int main() {
 		current_ep_index = (current_ep_index + 1) % ep.size(); // 循环使用ep值
 		}
 		if (remaining_itl_bits > 0) {
-		std::vector<int>	remaining_sub_itl_bits(itl_bits.end() - remaining_itl_bits, itl_bits.end());
+		std::vector<int>	remaining_sub_itl_bits(Sy_bits.end() - remaining_itl_bits, Sy_bits.end());
 		std::vector<float>	remaining_symbols = std::vector<float>(remaining_itl_bits);
 		std::vector<float>	remaining_noisy_symbols = std::vector<float>(remaining_itl_bits);
 		std::vector<float>	remaining_LLRs = std::vector<float>(remaining_itl_bits);
@@ -188,16 +241,17 @@ int main() {
 		memcpy(llrbyteData.data(), LLRs.data(), llrbyteData.size());
 		send(clientSocket, llrbyteData.data(), llrbyteData.size(), 0);
 	//-------------------------------------------------------------------------------------------------------------------
-		frame_id_recv.resize(frame_itl_number * sizeof(uint32_t));
-		recv(clientSocket, frame_id_recv.data(), frame_id_recv.size(), 0);
-		memcpy(feedback_frame_id.data(), frame_id_recv.data(), frame_id_recv.size());
-		std::cout << std::endl << "feedback_frame_id: " << feedback_frame_id[0];
+		//frame_id_recv.resize(frame_itl_number * sizeof(uint32_t));
+		RecvFeedbackFrameIdByteData.resize(sizeof(uint32_t));
+		recv(clientSocket, RecvFeedbackFrameIdByteData.data(), RecvFeedbackFrameIdByteData.size(), 0);
+		memcpy(recv_feedback_frame_id.data(), RecvFeedbackFrameIdByteData.data(), RecvFeedbackFrameIdByteData.size());
+		std::cout << std::endl << "recv_feedback_frame_id: " << recv_feedback_frame_id[0];
 	}
 	//-------------------------------------------------------------------------------------------------------------------
 	//------------------------------------------------------------------------------------------------------------------- 
 	outFile.close();			// 关闭文件frame_id
-	//terminal->final_report();	// display the performance (BER and FER) in the terminal
-	monitor->reset();			// reset the monitor for the next SNR
+	terminal->final_report();	// display the performance (BER and FER) in the terminal
+	monitor->reset();			// reset the monitor 
 	closesocket(clientSocket);	//断开连接
 	WSACleanup();
 	return 0;

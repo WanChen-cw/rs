@@ -112,7 +112,13 @@ public:
 	void generate(std::vector<B, A>& date, const uint64_t frame_id, std::vector<B, A>& U);
 
 	template <class A = std::allocator<B>, class Q = std::allocator<R>>
+	void codeframe(std::vector<B, A>& itl_bits, std::vector<B, A>& Sy_bits);
+
+	template <class A = std::allocator<B>, class Q = std::allocator<R>>
 	void deframe(std::vector<R, Q>& getU, std::vector<R, Q>& getdate);
+
+	template <class A = std::allocator<B>, class Q = std::allocator<R>>
+	void deframe(std::vector<B, A>& getU, std::vector<B, A>& getdate,bool isbits);
 
 	std::unique_ptr<module::CRC<>>					crc;
 protected:
@@ -276,6 +282,29 @@ void Synchronizeframegenerate<B, R>
 }
 
 template<typename B, typename R>
+template<class A, class Q>
+void Synchronizeframegenerate<B, R>
+::codeframe(std::vector<B, A>& itl_bits, std::vector<B, A>& Sy_bits)
+{
+	int num_synchronize = (itl_bits.size() + 8 * datelength - 1) / (8 * datelength);
+	for (int i = 0; i < num_synchronize; i++){
+		int startIdx = i * datelength * 8;
+		int endIdx = std::min((i + 1) * datelength * 8, static_cast<int>(itl_bits.size()));
+		std::vector<int> segment(itl_bits.begin() + startIdx, itl_bits.begin() + endIdx);
+		if (endIdx < (i + 1) * datelength * 8) {
+			int zerosToAdd = (i + 1) * datelength * 8 - endIdx;
+			segment.insert(segment.end(), zerosToAdd, 0);
+		}
+		std::vector<int> Sy_segment(8 * FrameLength);
+		uint64_t id = (uint64_t)1 << 40 + (uint64_t)i;
+		this->generate(segment, id, Sy_segment);
+		for (size_t j = 0; j < Sy_segment.size(); ++j) {
+			Sy_bits[i * FrameLength * 8 + j] = Sy_segment[j];
+		}
+	}
+}
+
+template<typename B, typename R>
 template<class A,class Q>
 void Synchronizeframegenerate<B, R>
 ::deframe(std::vector<R, Q>& getU, std::vector<R, Q>& getdate)
@@ -283,11 +312,11 @@ void Synchronizeframegenerate<B, R>
 	int num_synchronize = (getdate.size() + 8 * datelength - 1) / (8 * datelength);
 	int xx = num_synchronize;
 	int xx2 = xx;
-	std::cout << "----------" << xx << std::endl;
+	//std::cout << "----------" << xx << std::endl;
 	for (int i = 0; i < num_synchronize; ++i) {
 		int startIdx = i * FrameLength * 8;
 		int endIdx = std::min((i + 1) * FrameLength * 8, static_cast<int>(getU.size()));
-		std::vector<float> segment(getU.begin() + startIdx, getU.begin() + endIdx);
+		std::vector<R> segment(getU.begin() + startIdx, getU.begin() + endIdx);
 		std::vector<B> dec_segment(8 * datelength,0);
 		
 
@@ -306,7 +335,7 @@ void Synchronizeframegenerate<B, R>
 		{
 			frameendrecv[j] = getU[endIdx -16+j] > 0 ? (B)0 : (B)1;
 		}
-		//if (std::equal(frameheaderrecv.begin() , frameheaderrecv.end(), frameheader.begin() )&& std::equal(frameend.begin() , frameend.end(), frameendrecv.begin())){
+		if (std::equal(frameheaderrecv.begin() , frameheaderrecv.end(), frameheader.begin() )&& std::equal(frameend.begin() , frameend.end(), frameendrecv.begin())){
 			uint64_t id = (uint64_t)1 << 40 + (uint64_t)i;
 			hammindecode(idrecv, 8*10);
 			uint64_t id_de = dexorFourBits(idrecv, 8*8);
@@ -315,7 +344,7 @@ void Synchronizeframegenerate<B, R>
 				xx--;
 				std::copy(segment.begin() + 28 * 8, segment.end() - 32, dec_segment.begin());
 			}
-		//}
+		}
 		for (size_t j = 0; j < dec_segment.size(); ++j) {
 			if (i * datelength * 8 + j >= getdate.size())
 				break;
@@ -323,7 +352,57 @@ void Synchronizeframegenerate<B, R>
 				getdate[i * datelength * 8 + j] = dec_segment[j];
 		}
 	}
-	std::cout<< "errorid::" << xx <<"errorheader::" << xx2 << std::endl;
+	//std::cout << std::endl << "errorid:" << xx <<"   errorheader:" << xx2 << std::endl;
 }
+
+template<typename B, typename R>
+template<class A, class Q>
+void Synchronizeframegenerate<B, R>
+::deframe(std::vector<B, A>& getU, std::vector<B, A>& getdate, bool isbits)
+{
+	int num_synchronize = (getdate.size() + 8 * datelength - 1) / (8 * datelength);
+	int xx = num_synchronize;
+	int xx2 = xx;
+	//std::cout << "----------" << xx << std::endl;
+	for (int i = 0; i < num_synchronize; ++i) {
+		int startIdx = i * FrameLength * 8;
+		int endIdx = std::min((i + 1) * FrameLength * 8, static_cast<int>(getU.size()));
+		std::vector<B> segment(getU.begin() + startIdx, getU.begin() + endIdx);
+		std::vector<B> dec_segment(8 * datelength, 0);
+		std::vector<B> frameheaderrecv(8 * 8, 0);
+		for (int j = 0; j < frameheaderrecv.size(); j++)
+		{
+			frameheaderrecv[j] = getU[startIdx + j] ;
+		}
+		std::vector<B> idrecv(15 * 8, 0);
+		for (int j = 0; j < idrecv.size(); j++)
+		{
+			idrecv[j] = getU[startIdx + 8 * 8 + j] ;
+		}
+		std::vector<B> frameendrecv(2 * 8, 0);
+		for (int j = 0; j < frameendrecv.size(); j++)
+		{
+			frameendrecv[j] = getU[endIdx - 16 + j] ;
+		}
+		if (std::equal(frameheaderrecv.begin(), frameheaderrecv.end(), frameheader.begin()) && std::equal(frameend.begin(), frameend.end(), frameendrecv.begin())) {
+			uint64_t id = (uint64_t)1 << 40 + (uint64_t)i;
+			hammindecode(idrecv, 8 * 10);
+			uint64_t id_de = dexorFourBits(idrecv, 8 * 8);
+			xx2--;
+			if (id_de == id) {
+				xx--;
+				std::copy(segment.begin() + 28 * 8, segment.end() - 32, dec_segment.begin());
+			}
+		}
+		for (size_t j = 0; j < dec_segment.size(); ++j) {
+			if (i * datelength * 8 + j >= getdate.size())
+				break;
+			else
+				getdate[i * datelength * 8 + j] = dec_segment[j];
+		}
+	}
+	//std::cout << std::endl << "errorid:" << xx <<"   errorheader:" << xx2 << std::endl;
+}
+
 
 #endif /*FRAMEGENERATE_HPP_*/

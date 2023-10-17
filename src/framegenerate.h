@@ -7,6 +7,8 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <queue>
+#include <set>
 #include <aff3ct.hpp>
 using namespace aff3ct;
 
@@ -266,11 +268,16 @@ MoCh<B,R>
 	:Slength(Slength), vary_chl_bit(vary_chl_bit), current_ep(1,ep1), current_ep1(1,ep1), seed(seed)
 {
 	current_ep_index = seed;
-	modem1 = std::unique_ptr<module::Modem<>>(new module::Modem_OOK_BSC   <>(Slength));
-	channel = std::unique_ptr<module::Channel<>>(new module::Channel_binary_symmetric<>(vary_chl_bit));
+	modem1 = std::unique_ptr<module::Modem<>>(new module::Modem_BPSK   <>(Slength));
+	//Modem_BPSK
+	//Channel_AWGN_LLR
+
+	//Modem_OOK_BSC
+	//Channel_binary_symmetric
+	channel = std::unique_ptr<module::Channel<>>(new module::Channel_AWGN_LLR<>(vary_chl_bit));
 	channel->set_seed(seed);
 	remaining_itl_bits = Slength % vary_chl_bit;
-		channel1 = std::unique_ptr<module::Channel<>>(new module::Channel_binary_symmetric<>(remaining_itl_bits));
+		channel1 = std::unique_ptr<module::Channel<>>(new module::Channel_AWGN_LLR<>(remaining_itl_bits));
 		channel1->set_seed(seed);
 	read_File(channel_filename,ep);
 }
@@ -337,6 +344,186 @@ void MoCh<B, R>
 	inputFile.close();
  }
 
+//---------------------------------------------------------------------------------------------------------------------------------------------------
+
+template <typename B = int, typename R = float>
+class Monitor_m
+{
+public:
+	Monitor_m(int datelength, int FrameLength, int frame_itl_number,int Slength, int bit_length_transmission, int fe, int dely_frame);
+
+	template <class A = std::allocator<B>, class Q = std::allocator<R>>
+	void channel_check_errors(std::vector<R, Q>& LLRs, std::vector<B, A>& Sy_bits);
+
+	template <class A = std::allocator<B>, class Q = std::allocator<R>>
+	void Synchronize_check_errors(std::vector<R, Q>& deSy, std::vector<B, A>& desybit);
+
+	template <class A = std::allocator<B>, class Q = std::allocator<R>>
+	void crc_check_errors(std::vector<B, A>& dec_bits);
+
+	int get_feedback_frame_id()			{return feedback_frame_id;	}
+	int get_recv_feedback_frame_id()	{return recv_feedback_frame_id;}
+	void display();
+	void reset();
+private:
+	uint32_t findMaxContinuousValue(std::vector<uint32_t>& feedback_frame_id, uint32_t k) {
+		//feedback reliable
+		std::sort(feedback_frame_id.begin(), feedback_frame_id.end()); // Sort the sequence
+		uint32_t max_continuous_value = k + 1;
+		for (const uint32_t value : feedback_frame_id) {
+			if (value == max_continuous_value) {
+				max_continuous_value++;
+			}
+			else if (value > max_continuous_value) {
+				feedback_frame_id.erase(feedback_frame_id.begin(), std::lower_bound(feedback_frame_id.begin(), feedback_frame_id.end(), max_continuous_value));
+				break;
+			}
+		}
+		return max_continuous_value - 1;
+
+		//unreliable feedback
+		//return *(feedback_frame_id.end() - 1);
+
+	}
+protected:
+	int datelength;
+	int FrameLength;
+	int frame_itl_number;
+	int Slength;
+	int bit_length_transmission;
+	int dely_frame;
+	int fe;
+	std::unique_ptr<module::CRC<>>					crc;
+	std::unique_ptr<module::Monitor_BFER<>>			monitor;
+	std::unique_ptr<module::Monitor_BFER<>>			monitor2;
+	std::unique_ptr<module::Monitor_BFER<>>			monitor3;
+
+	uint32_t feedback_frame_id ;							//要发送的反馈帧序号
+	uint32_t recv_feedback_frame_id ;					//接受的反馈帧序号
+	int number_transimission_recv ;						//解码成功的传输帧个数
+	std::vector<uint32_t>recv_frame_id;						//接收到的传输帧号
+	std::queue<uint32_t> dely_frame_id;						//延时队列
+	std::queue<uint32_t> dely_feedback_frame_id;			//延时队列
+
+	std::vector<std::unique_ptr<tools::Reporter>>	reporters; // list of reporters dispayed in the terminal
+	std::unique_ptr<tools::Terminal_std>			terminal;  // manage the output text in the terminal
+};
+
+template<typename B, typename R>
+Monitor_m<B, R>
+::Monitor_m(int datelength, int FrameLength, int frame_itl_number, int Slength, int bit_length_transmission, int fe,int dely_frame)
+	:datelength(datelength), FrameLength(FrameLength), frame_itl_number(frame_itl_number), bit_length_transmission(bit_length_transmission), Slength(Slength), fe(fe), dely_frame(dely_frame)
+{
+	feedback_frame_id = 0;							
+	recv_feedback_frame_id = 0;					
+	number_transimission_recv = 0;	
+	for (int i = 0; i < dely_frame; ++i) {					//延时队列初始化
+		dely_frame_id.push(0);
+	}
+	for (int i = 0; i < dely_frame; ++i) {					//延时队列初始化
+		dely_feedback_frame_id.push(0);
+	}
+	crc = std::unique_ptr<module::CRC_polynomial	<>>(new module::CRC_polynomial			<>((datelength + 9) * 8, "32-GZIP"));
+	monitor = std::unique_ptr<module::Monitor_BFER	<>>(new module::Monitor_BFER<>(8 * (FrameLength - 4), fe));
+	monitor2 = std::unique_ptr<module::Monitor_BFER	<>>(new module::Monitor_BFER<>(Slength, fe));
+	monitor3 = std::unique_ptr<module::Monitor_BFER	<>>(new module::Monitor_BFER<>(bit_length_transmission, fe));
+	reporters.push_back(std::unique_ptr<tools::Reporter>(new tools::Reporter_BFER<>(*monitor)));			// report the bit/frame error rates
+	reporters.push_back(std::unique_ptr<tools::Reporter>(new tools::Reporter_throughput<>(*monitor)));	// report the simulation throughputs
+	terminal = std::unique_ptr<tools::Terminal_std>(new tools::Terminal_std(reporters));					// create a terminal that will display the collected data from the reporters
+	terminal->legend();																					// display the legend in the terminal
+	terminal->start_temp_report();
+}
+
+template<typename B, typename R>
+template<class A, class Q>
+void Monitor_m<B, R>
+::channel_check_errors(std::vector<R, Q>& LLRs, std::vector<B, A>& Sy_bits){
+	std::vector<int  >	NOISE_Sy_bits = std::vector<int  >(Slength);
+	for (int j = 0; j < LLRs.size(); j++) {
+		NOISE_Sy_bits[j] = LLRs[j] > 0 ? (int)0 : (int)1;
+	}
+	monitor2->check_errors(NOISE_Sy_bits, Sy_bits);
+}
+
+template<typename B, typename R>
+template<class A, class Q>
+void Monitor_m<B, R>
+::Synchronize_check_errors( std::vector<R, Q>& deSy,std::vector<B, A>& desybit ){
+	std::vector<int  > buff2 = std::vector<int  >(bit_length_transmission);
+	for (int j = 0; j < bit_length_transmission; j++) {
+		buff2[j] = deSy[j] > 0 ? (int)0 : (int)1;
+	}
+	monitor3->check_errors(buff2, desybit);
+}
+
+template<typename B, typename R>
+template<class A, class Q>
+void Monitor_m<B, R>
+::crc_check_errors(std::vector<B, A>& dec_bits){
+	std::vector<B>	segmentdec = std::vector<int  >(8 * (datelength + 13));
+	std::vector<B>	segmentdec_info = std::vector<int  >(8 * (datelength + 9));
+	std::vector<B>	segmentdec_crc = std::vector<int  >(8 * (datelength + 13));
+	for (int i = 0; i < frame_itl_number; ++i) {
+		int startIdx = i * 8 * FrameLength;
+		int endIdx = (i + 1) * 8 * FrameLength;
+		for (size_t j = 0; j < segmentdec.size(); ++j) {
+			segmentdec[j] = dec_bits[startIdx + 16 + j];//截取非帧头帧尾数据
+		}
+		std::copy(std::begin(segmentdec), std::end(segmentdec) - 32, std::begin(segmentdec_info));
+		crc->build(segmentdec_info, segmentdec_crc);
+		int error = monitor->check_errors(segmentdec_crc, segmentdec);
+		if (!error) {
+			uint32_t frame_id_buff = 0;
+			uint32_t feedback_frame_id_buff = 0;
+			number_transimission_recv++;
+			for (int i = 0; i < 32; ++i) {
+				bool bit = segmentdec_crc[8 + i];
+				frame_id_buff |= (bit << (31 - i));
+			}
+			for (int i = 0; i < 32; ++i) {
+				bool bit = segmentdec_crc[segmentdec_crc.size() - 64 + i];
+				feedback_frame_id_buff |= (bit << (31 - i));
+			}
+			dely_frame_id.push(frame_id_buff);
+			recv_frame_id.push_back(dely_frame_id.front());
+			dely_frame_id.pop();
+			dely_feedback_frame_id.push(feedback_frame_id_buff);
+			recv_feedback_frame_id = dely_feedback_frame_id.front() > recv_feedback_frame_id ? dely_feedback_frame_id.front() : recv_feedback_frame_id;
+			dely_feedback_frame_id.pop();
+		}
+	}
+	feedback_frame_id = findMaxContinuousValue(recv_frame_id, feedback_frame_id);
+}
+
+template<typename B, typename R>
+void Monitor_m<B, R>
+::display(){
+	std::cout << std::endl << "信道平均误码率：" << monitor2->get_ber() << std::endl;
+	std::cout << "解除同步后误码率（信道平均）：" << monitor3->get_ber() << std::endl;
+	if (number_transimission_recv > dely_frame) {
+		std::cout << "transimission effiency:" << (float)feedback_frame_id / (number_transimission_recv - dely_frame) << std::endl;
+	}
+}
+
+template<typename B, typename R>
+void Monitor_m<B, R>
+::reset(){
+	while (!dely_frame_id.empty()){
+		recv_frame_id.push_back(dely_frame_id.front());
+		dely_frame_id.pop();
+	}
+	std::set<uint32_t> unique_values;
+	for (const uint32_t& value : recv_frame_id) {
+		if (value > feedback_frame_id) {
+			unique_values.insert(value);
+		}
+	}
+	feedback_frame_id+=unique_values.size();
+	this->display();
+	terminal->final_report();// display the performance (BER and FER) in the terminal
+	monitor->reset();// reset the monitor 
+	terminal->reset();
+}
 //---------------------------------------------------------------------------------------------------------------------------------------------------
 
 template <typename B = int, typename R=float >
@@ -551,7 +738,7 @@ void Synchronizeframegenerate<B, R>
 	int num_synchronize = (getdate.size() + 8 * datelength - 1) / (8 * datelength);
 	int xx = num_synchronize;
 	int xx2 = xx;
-	std::cout << "----------" << xx << std::endl;
+	//std::cout << "----------" << xx << std::endl;
 	for (int i = 0; i < num_synchronize; ++i) {
 		int startIdx = i * FrameLength * 8;
 		int endIdx = std::min((i + 1) * FrameLength * 8, static_cast<int>(getU.size()));
